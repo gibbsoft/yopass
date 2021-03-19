@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yopass
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yopass
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+      labels:
+        app: yopass
+    spec:
+      containers:
+        - name: yopass
+          image: jhaals/yopass
+          args:
+            - "--memcached=localhost:11211"
+          ports:
+            - name: http
+              containerPort: 1337
+        - name: yopass-memcached
+          image: memcached
+          args:
+            - "-m 64"
+          ports:
+            - name: memcached
+              containerPort: 11211
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: yopass
+spec:
+  selector:
+    app: yopass
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 1337
+---
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: use
+spec:
+  to:
+    kind: Service
+    name: yopass
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
