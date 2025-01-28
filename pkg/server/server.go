@@ -1,20 +1,25 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
-	"github.com/spf13/viper"
+	"math/rand"
 	"net/http"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gofrs/uuid"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/jhaals/yopass/pkg/yopass"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
+
+const keyParameter = "{key:(?:[0-9a-z]{3,5}-(?:[0-9a-z]{3,5}-)*[0-9a-z]{3,5})}"
 
 // Server struct holding database and settings.
 // This should be created with server.New
@@ -42,6 +47,11 @@ func New(db Database, maxLength int, r *prometheus.Registry, forceOneTimeSecrets
 
 // createSecret creates secret
 func (y *Server) createSecret(w http.ResponseWriter, request *http.Request) {
+	var (
+		words []string
+		key   string
+	)
+
 	w.Header().Set("Access-Control-Allow-Origin", viper.GetString("cors-allow-origin"))
 
 	decoder := json.NewDecoder(request.Body)
@@ -67,14 +77,46 @@ func (y *Server) createSecret(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// Generate new UUID
-	uuidVal, err := uuid.NewV4()
+	file, err := os.Open("words.txt")
 	if err != nil {
-		y.logger.Error("Unable to generate UUID", zap.Error(err))
-		http.Error(w, `{"message": "Unable to generate UUID"}`, http.StatusInternalServerError)
+		y.logger.Error("Unable to open words file", zap.Error(err))
+		http.Error(w, `{"message": "Unable to open words file"}`, http.StatusInternalServerError)
 		return
 	}
-	key := uuidVal.String()
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		words = append(words, scanner.Text())
+	}
+
+	if err := scanner.Err(); err != nil {
+		y.logger.Error("Error reading words", zap.Error(err))
+		http.Error(w, `{"message": "Error reading words"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if len(words) < 3 {
+		y.logger.Error("Not enough words in words")
+		http.Error(w, `{"message": "Not enough words in words"}`, http.StatusInternalServerError)
+		return
+	}
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	maxAttempts := 100
+	for i := 0; i < maxAttempts; i++ {
+		key = strings.ToLower(words[r.Intn(len(words))] + "-" + words[r.Intn(len(words))] + "-" + words[r.Intn(len(words))])
+		if matched, _ := regexp.MatchString(keyParameter, key); matched {
+			if _, err := y.db.Get(key); err != nil {
+				break
+			}
+		}
+	}
+	if key == "" {
+		y.logger.Error("Failed to generate a valid key")
+		http.Error(w, `{"message": "Failed to generate a valid key"}`, http.StatusInternalServerError)
+		return
+	}
 
 	// store secret in memcache with specified expiration.
 	if err := y.db.Put(key, s); err != nil {
@@ -169,8 +211,6 @@ func (y *Server) HTTPHandler() http.Handler {
 	mx.PathPrefix("/").Handler(http.FileServer(http.Dir("public")))
 	return handlers.CustomLoggingHandler(nil, SecurityHeadersHandler(mx), httpLogFormatter(y.logger))
 }
-
-const keyParameter = "{key:(?:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})}"
 
 // validExpiration validates that expiration is either
 // 3600(1hour), 86400(1day) or 604800(1week)
